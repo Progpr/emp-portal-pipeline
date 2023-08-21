@@ -1,0 +1,168 @@
+stages:
+ - test
+ - build
+ - deploy feature
+ - automated feature testing
+ - deploy staging
+ - automated testing
+ - deploy production
+
+
+variables:
+ IMAGE_TAG: $CI_REGISTRY_IMAGE/employee-image:$CI_COMMIT_SHORT_SHA
+ STAGING_APP: emp-portal-stage
+ HEROKU_STAGING: "registry.heroku.com/$STAGING_APP/web"
+ PRODUCTION_APP: emp-portal-product
+ HEROKU_PRODUCTION: "registry.heroku.com/$PRODUCTION_APP/web"
+ FEATURE_APP: $CI_ENVIRONMENT_SLUG
+ HEROKU_FEATURE: "registry.heroku.com/$FEATURE_APP/web"
+
+lint_test:
+ image: python:3.8.0-slim
+ stage: test
+ script:
+  - pip install flake8-html
+  - flake8 --format=html --htmldir=flake_reports
+ artifacts:
+  when: always
+  paths:
+   - flake_reports
+
+pytest:
+ image: python:3.8.0-slim
+ stage: test
+ script:
+  - pip install pytest-html
+  - pip install -r requirements.txt
+  - pytest --html=pytest_reports/pytest_reports.html --self-contained-html
+ artifacts:
+  when: always
+  paths:
+   - pytest_reports
+
+
+build:
+ image: docker:latest
+ services:
+  - docker:dind 
+ stage: build
+ script:
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  - deocker build -t $IMAGE_TAG .
+  - docker images
+  - docker push $IMAGE_TAG
+
+
+deploy_feature:
+ image: docker:latest
+ services:
+  - docker:dind
+ stage: deploy feature
+ environment:
+  name: review/$CI_COMMIT_REF_NAME
+  url: https://$CI_ENVIRONMENT_SLUG.herokuapp.com/
+  on_stop: stop_feature
+ script:
+  - export FEATURE_APP="$CI_ENVIRONMENT_SLUG"
+  - export HEROKU_FEATURE="registry.heroku.com/$FEATURE_APP/web"
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  - echo "FEATURE_APP="$CI_ENVIRONMENT_SLUG" >> deploy_feature.env
+  - docker pull $IMAGE_TAG
+  - docker tag $IMAGE_TAG $HEROKU_FEATURE
+  - docker run --rm -e HEROKU_API_KEY=$HEROKU_STAGING_API_KEY wingrunr21/alpine-heroku-cli create $FEATURE_APP
+  - docker login -u _ -p $HEROKU_STAGING_API_KEY registry.heroku.com
+  - docker push $HEROKU_STAGING
+  - docker run --rm -e HEROKU_API_KEY=$HEROKU_STAGING_API_KEY wingrunr21/alpine-heroku-cli container:release web --ap $FEATURE_APP
+ artifacts:
+  reports:
+   dotenv: deploy_feature.env
+ only:
+  - /^feature-.*$/
+
+stop_feature:
+ image: docker:latest
+ services: 
+  - docker:dind
+ stage: deploy feature
+ variables:
+  GIT_STRATEGY: none
+ environment:
+  name: review/$CI_COMMIT_REF_NAME
+  action: stop
+ script:
+  - export FEATURE_APP="$CI_ENVIRONMENT_SLUG"
+  - docker run --rm -e HEROKU_API_KEY=$HEROKU_STAGING_API_KEY wingrunr21/alpine-heroku-cli apps:destroy --app $FEATURE_APP --confirm $FEATURE_APP
+ when:
+  - manual
+ 
+test_feature:
+ image: alpine
+ stage: automated feature testing
+ script:
+  - apk --np-cache add curl
+  - curl https://$FEATURE_APP.herokuapp.com/ | grep "Employee Data"
+ dependencies:
+  - deploy_feature
+ only:
+  - /^feature-.*$/
+  
+
+.job_template: &template
+ image: docker:latest
+ services:
+  - docker:dind
+ environment:
+  url: https://$APP.herokuapp.com/
+ script:
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  - docker pull $IMAGE_TAG
+  - docker tag $IMAGE_TAG $HEROKU
+  - docker login -u _ -p $HEROKU_API_KEY registry.heroku.com
+  - docker push $HEROKU
+  - docker run --rm -e HEROKU_API_KEY=$HEROKU_API_KEY wingrunr21/alpine-heroku-cli container:release web --ap $APP
+ only:
+  - main
+
+deploy_stage:
+ <<: *template
+ stage: deploy staging
+ variables:
+  APP: $STAGING_APP
+  HEROKU_API_KEY: $HEROKU_API_KEY
+  HEROKU: $HERPKU_STAGING
+ environment:
+  name: staging
+
+ script:
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  - docker pull $IMAGE_TAG
+  - docker tag $IMAGE_TAG $HEROKU_STAGING
+  - docker login -u _ -p $HEROKU_STAGING_API_KEY registry.heroku.com
+  - docker push $HEROKU_STAGING
+  - docker run --rm -e HEROKU_API_KEY=$HEROKU_STAGING_API_KEY wingrunr21/alpine-heroku-cli container:release web --ap $STAGING_APP
+ only:
+  - main
+  
+testt_case:
+ image: alpine
+ stage: automated testing
+ script:
+  - apk --np-cache add curl
+  - curl https://$STAGING_APP.herokuapp.com/ | grep "Employee Data"
+ only:
+  - main
+
+deploy_production:
+ <<: *template
+ stage: deploy production
+ variables:
+  APP: $PRODUCTION_APP
+  HEROKU_API_KEY: $PRODUCTION_API_KEY
+  HEROKU: $PRODUCTION_STAGING
+ environment:
+  name: production
+
+ when: manual
+
+
+ 
